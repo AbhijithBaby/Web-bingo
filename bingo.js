@@ -2,7 +2,7 @@
 //  BINGO! — Client logic
 // ════════════════════════════════════════
 
-const API = '';
+const API = 'https://web-bingo-sever.onrender.com';
 
 // ── Persistent identity ──
 let myId = localStorage.getItem('bingo_id');
