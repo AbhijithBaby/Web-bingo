@@ -2,7 +2,7 @@
 //  BINGO! — Client logic
 // ════════════════════════════════════════
 
-const API = 'https://web-bingo-sever.onrender.com';
+const API = '';
 
 // ── Persistent identity ──
 let myId = localStorage.getItem('bingo_id');
@@ -558,7 +558,13 @@ function showSetup(room) {
   document.getElementById('setupTitle').textContent = `Fill your ${gs}×${gs} grid`;
   document.getElementById('setupHint').textContent  = `Numbers 1–${gs * gs}`;
   setupCard = new Array(gs * gs).fill(0);
-  cardSubmitted = false; selPoolNum = null;
+  cardSubmitted = false;
+  selPoolNum    = null;
+  _submitting   = false;
+  // Reset DOM visibility — submitCard() hides readyBtn and shows setupWait;
+  // those inline styles persist across rounds so we must explicitly undo them.
+  document.getElementById('readyBtn').style.display  = 'block';
+  document.getElementById('setupWait').style.display = 'none';
   renderSetupGrid(); renderNumPool(); checkReadyBtn();
 }
 
