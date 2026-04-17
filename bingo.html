@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WEB-BINGO</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bitcount+Grid+Double:wght@100..900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Boogaloo&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="bingo.css">
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════
+       WELCOME SCREEN
+       ══════════════════════════════════════ -->
+  <div id="welcomeScreen" class="screen active">
+
+    <div class="logo"><span>B</span><span>I</span><span>N</span><span>G</span><span>O</span></div>
+    <p class="tagline">Turn-based · Multiplayer</p>
+
+    <div class="card">
+
+      <!-- Name — always visible -->
+      <div class="field" style="margin-bottom:.9rem">
+        <label>Your name</label>
+        <input type="text" id="playerName" placeholder="Enter your name…" maxlength="18" autocomplete="off">
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="browse" onclick="switchTab('browse')">🌐 Browse</button>
+        <button class="tab-btn"        data-tab="quick"  onclick="switchTab('quick')">⚡ Quick Join</button>
+        <button class="tab-btn"        data-tab="create" onclick="switchTab('create')">➕ Create</button>
+      </div>
+
+      <!-- ── Browse tab ── -->
+      <div class="tab-pane active" id="tab-browse">
+        <div class="refresh-row">
+          <span class="refresh-label" id="roomCountLabel">Loading rooms…</span>
+          <button class="btn btn-ghost btn-sm" onclick="loadRooms()">⟳ Refresh</button>
+        </div>
+        <div class="room-list" id="roomList">
+          <div class="room-empty"><span class="spinner"></span></div>
+        </div>
+        <div class="divider"><span>or join by code</span></div>
+        <div class="field-row">
+          <div class="field">
+            <label>Room code</label>
+            <input type="text" id="joinCode" class="big" placeholder="ABCD" maxlength="4" style="font-size:1.4rem;letter-spacing:5px">
+          </div>
+          <button class="btn btn-secondary btn-sm" style="margin-bottom:.02rem" onclick="joinByCode()">Join</button>
+        </div>
+      </div>
+
+      <!-- ── Quick join tab ── -->
+      <div class="tab-pane" id="tab-quick">
+        <div class="qj-pane">
+          <div class="qj-icon">🎯</div>
+          <p class="qj-desc">We'll find the best open room and put you right in.</p>
+          <button class="btn btn-success" style="max-width:220px" onclick="quickJoin()">Find me a game!</button>
+          <p style="font-size:.7rem;color:var(--muted)">Only joins public, password-free rooms</p>
+        </div>
+      </div>
+
+      <!-- ── Create tab ── -->
+      <div class="tab-pane" id="tab-create">
+        <div class="create-pane">
+          <div class="field" style="margin-bottom:.5rem">
+            <label>Grid size</label>
+            <div class="gs-stepper">
+              <button onclick="changeGS(-1)">−</button>
+              <div class="gs-val" id="gsDisp">5×5</div>
+              <button onclick="changeGS(1)">+</button>
+            </div>
+            <div style="text-align:center;font-size:.7rem;color:var(--muted)">Numbers 1–<span id="gsMax">25</span></div>
+          </div>
+
+          <div style="margin-bottom:.5rem">
+            <div class="pw-row">
+              <div class="tog-wrap" onclick="togglePublic()">
+                <div class="tog on" id="publicTog"></div>
+                Public room
+              </div>
+            </div>
+          </div>
+
+          <div id="passwordRow" class="field" style="display:none">
+            <label>Password (optional)</label>
+            <div class="pw-input-wrap">
+              <input type="password" id="createPw" placeholder="Leave blank for no password" maxlength="50">
+              <button class="pw-eye-btn" type="button" onclick="togglePwVis('createPw',this)" title="Show/hide">👁</button>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" onclick="createRoom()">🎲 Create Room</button>
+        </div>
+      </div>
+
+    </div><!-- /.card -->
+  </div><!-- /#welcomeScreen -->
+
+
+  <!-- ══════════════════════════════════════
+       LOBBY SCREEN
+       ══════════════════════════════════════ -->
+  <div id="lobbyScreen" class="screen">
+    <div class="card" style="max-width:460px">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>🎰 Game Lobby</span>
+        <button class="btn-exit" onclick="exitLobby()" title="Exit to main menu">✕ Exit</button>
+      </div>
+
+      <p style="text-align:center;color:var(--muted);font-size:.76rem;margin-bottom:.4rem">
+        Share this code with friends
+      </p>
+      <div class="room-code-box" id="lobbyCode"></div>
+      <div id="lobbyMeta" style="text-align:center;font-size:.72rem;color:var(--muted);margin-bottom:.8rem"></div>
+
+      <!-- Host settings -->
+      <div id="hostSettings" style="display:none">
+        <div class="lobby-settings">
+          <div class="lobby-settings-title">Host settings</div>
+          <div style="margin-bottom:.5rem">
+            <div style="font-size:.7rem;color:var(--muted);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:1px">Grid size</div>
+            <div class="gs-stepper" style="justify-content:flex-start;gap:.5rem">
+              <button onclick="changeHostGS(-1)">−</button>
+              <div class="gs-val" id="hgsDisp" style="font-size:1.3rem;min-width:44px">5×5</div>
+              <button onclick="changeHostGS(1)">+</button>
+              <span style="font-size:.7rem;color:var(--muted);margin-left:.3rem">Numbers 1–<span id="hgsMax">25</span></span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap">
+            <div class="tog-wrap" onclick="toggleLobbyPublic()">
+              <div class="tog on" id="lobbyPublicTog"></div>
+              Public room
+            </div>
+            <div class="tog-wrap" onclick="toggleLobbyPassword()">
+              <div class="tog" id="lobbyPwTog"></div>
+              Password protect
+            </div>
+          </div>
+          <div id="lobbyPwRow" class="field" style="display:none;margin-top:.5rem;margin-bottom:0">
+            <label>Password</label>
+            <div class="pw-input-wrap">
+              <input type="password" id="lobbyPwInput" placeholder="Enter room password…" maxlength="50"
+                     oninput="updateLobbyPassword()"
+                     onkeydown="if(event.key==='Enter') pushSettings()">
+              <button class="pw-eye-btn" type="button" onclick="togglePwVis('lobbyPwInput',this)" title="Show/hide password">👁</button>
+              <button class="pw-confirm-btn btn btn-success btn-sm" type="button" onclick="pushSettings()" title="Apply password">✓</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <ul class="player-list" id="lobbyPlayers"></ul>
+
+      <div id="hostStart" style="display:none">
+        <button class="btn btn-success" onclick="startGame()">🎮 Start Game</button>
+        <p style="text-align:center;font-size:.7rem;color:var(--muted);margin-top:.38rem">
+          Everyone arranges their card next
+        </p>
+      </div>
+      <div id="guestWait" style="text-align:center;color:var(--muted);font-size:.84rem;margin-top:.5rem;display:none">
+        Waiting for host to start…
+      </div>
+
+      <div class="status-bar"><span class="ping"></span>Connected</div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════
+       SETUP SCREEN
+       ══════════════════════════════════════ -->
+  <div id="setupScreen" class="screen">
+    <div class="setup-wrap">
+      <div style="text-align:center">
+        <div class="logo" style="font-size:2rem;letter-spacing:4px">
+          <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
+        </div>
+        <p style="color:var(--a4);font-family:'Boogaloo',cursive;font-size:1.05rem;margin-top:.2rem">Arrange your card!</p>
+        <p id="setupHint" style="font-size:.73rem;color:var(--muted);margin-top:.15rem"></p>
+      </div>
+
+      <div class="setup-panel">
+        <div class="sec-title" id="setupTitle">Fill your 5×5 grid</div>
+        <div class="setup-grid" id="setupGrid"></div>
+        <div class="setup-actions">
+          <button class="btn btn-secondary btn-sm" onclick="randomFill()">🎲 Randomize</button>
+          <button class="btn btn-warn btn-sm"      onclick="clearAll()">✕ Clear</button>
+        </div>
+      </div>
+
+      <div class="setup-panel">
+        <div class="sec-title" style="font-size:.85rem;margin-bottom:.5rem">Tap number → tap cell to place</div>
+        <div class="num-pool" id="numPool"></div>
+      </div>
+
+      <button class="btn btn-success" id="readyBtn" onclick="submitCard()"
+              style="max-width:260px;opacity:.5" disabled>✓ I'm Ready!</button>
+
+      <div id="setupWait" style="display:none;text-align:center;color:var(--a5);font-family:'Boogaloo',cursive;font-size:1.05rem">
+        ✓ Ready! Waiting for others…
+      </div>
+
+      <div class="status-bar"><span class="ping"></span>Connected</div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════
+       GAME SCREEN
+       ══════════════════════════════════════ -->
+  <div id="gameScreen" class="screen">
+
+    <div class="topbar">
+      <div class="tlogo"><span>B</span><span>I</span><span>N</span><span>G</span><span>O</span></div>
+      <div class="room-pill"   id="gRoomCode"></div>
+      <div class="player-pill" id="gPlayerPill"></div>
+      <button class="btn-exit" onclick="exitGame()" title="Exit to main menu">✕ Exit</button>
+    </div>
+
+    <div class="game-layout">
+
+      <!-- Bingo board -->
+      <div class="game-card">
+        <div class="bingo-header" id="gHeader"></div>
+        <div class="bingo-grid"   id="gGrid"></div>
+        <div class="toggle-wrap"  onclick="toggleAutoMark()">
+          <div class="tog" id="amTog"></div>
+          Auto-mark numbers when called
+        </div>
+      </div>
+
+      <!-- Side panel -->
+      <div class="side-panel">
+
+        <div class="turn-box other" id="turnBox">
+          <div class="turn-name" id="turnName">—</div>
+          <div class="turn-hint" id="turnHint"></div>
+        </div>
+
+        <div class="picker" id="picker">
+          <div class="phead">Choose a number to call</div>
+          <div class="picker-nums" id="pickerNums"></div>
+          <div id="callBar" style="display:none">
+            <button class="btn btn-warn btn-sm" onclick="confirmCall()">
+              📢 Call <span id="callLbl">?</span>!
+            </button>
+          </div>
+        </div>
+
+        <div class="last-box" id="lastBox" style="display:none">
+          <div class="last-lbl">Last called</div>
+          <div class="last-num" id="lastNum"></div>
+          <div style="font-size:.7rem;color:var(--muted)" id="calledCnt"></div>
+        </div>
+
+        <div>
+          <div class="phead">Called numbers</div>
+          <div class="chips" id="calledChips"></div>
+        </div>
+
+        <div>
+          <div class="phead">🎯 Progress (5 lines wins)</div>
+          <div id="progressList"></div>
+        </div>
+
+        <div id="rankSec" style="display:none">
+          <div class="phead">🏆 Rankings</div>
+          <div id="rankList"></div>
+        </div>
+
+        <div>
+          <div class="phead">👥 Players</div>
+          <div id="playersMini"></div>
+        </div>
+
+        <div>
+          <div class="phead">💬 Chat</div>
+          <div class="chat-msgs" id="chatMsgs"></div>
+          <div class="chat-row">
+            <input class="chat-inp" id="chatIn" placeholder="Say something…" maxlength="120"
+                   onkeydown="if(event.key==='Enter') sendChat()">
+            <button class="chat-btn" onclick="sendChat()">→</button>
+          </div>
+        </div>
+
+        <div class="status-bar"><span class="ping"></span>Connected</div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════
+       WIN OVERLAY
+       ══════════════════════════════════════ -->
+  <div id="winOverlay">
+    <div class="confetti-c" id="confC"></div>
+    <div class="win-box">
+      <div class="win-ttl">BINGO!</div>
+      <div style="font-family:'Boogaloo',cursive;font-size:1.1rem;color:var(--muted)">Final Rankings</div>
+      <div class="final-list" id="finalList"></div>
+      <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.5rem">
+        <button class="btn btn-primary" style="max-width:180px;flex:1" onclick="playAgain()">🔄 Play Again</button>
+        <button class="btn btn-ghost"   style="max-width:180px;flex:1" onclick="winMainMenu()">🏠 Main Menu</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════
+       PASSWORD MODAL
+       ══════════════════════════════════════ -->
+  <div class="modal-bg" id="pwModal">
+    <div class="modal">
+      <h3>🔒 Password Required</h3>
+      <div class="field">
+        <label>Enter room password</label>
+        <div class="pw-input-wrap">
+          <input type="password" id="pwInput" placeholder="Password…" maxlength="50"
+                 onkeydown="if(event.key==='Enter') confirmPasswordJoin()">
+          <button class="pw-eye-btn" type="button" onclick="togglePwVis('pwInput',this)" title="Show/hide">👁</button>
+        </div>
+      </div>
+      <div class="modal-btns">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="closePasswordModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" style="flex:1" onclick="confirmPasswordJoin()">Join →</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Confirm exit modal -->
+  <div class="modal-bg" id="exitModal">
+    <div class="modal">
+      <h3 id="exitModalTitle">Exit to Main Menu?</h3>
+      <p id="exitModalBody" style="font-size:.85rem;color:var(--muted);text-align:center;margin-bottom:1rem"></p>
+      <div class="modal-btns">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="closeExitModal()">Stay</button>
+        <button class="btn btn-warn btn-sm"  style="flex:1" id="exitModalConfirm" onclick="">Leave</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="rank-pop" id="rankPop"></div>
+  <div class="toast"    id="toast"></div>
+
+  <script src="bingo.js"></script>
+</body>
+</html>

@@ -58,12 +58,12 @@ body {
    ══════════════════════════════════════ */
 
 .logo {
-  font-family: 'Boogaloo', cursive;
+  font-family: 'Bitcount Grid Double', sans-serif; 
   font-size: clamp(3rem, 12vw, 5.5rem);
-  letter-spacing: 6px;
-  line-height: 1;
+  letter-spacing: 2px; 
   margin-bottom: .25rem;
   user-select: none;
+  font-weight: 700;
 }
 .logo span:nth-child(1) { color: var(--a1); }
 .logo span:nth-child(2) { color: var(--a3); }
@@ -552,10 +552,11 @@ body {
   flex-wrap: wrap;
 }
 .tlogo {
-  font-family: 'Boogaloo', cursive;
+  font-family: 'Bitcount Grid Double', sans-serif; 
   font-size: 1.6rem;
-  letter-spacing: 3px;
+  letter-spacing: 2px;
   flex-shrink: 0;
+  font-weight: 700;
 }
 .tlogo span:nth-child(1) { color: var(--a1); }
 .tlogo span:nth-child(2) { color: var(--a3); }
