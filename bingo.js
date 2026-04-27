@@ -1,8 +1,9 @@
 // ════════════════════════════════════════
-//  BINGO! — Client logic
+//  BINGO! — Client logic  (WebSocket edition)
 // ════════════════════════════════════════
 
-const API = 'https://web-bingo-sever.onrender.com';
+const API    = '';
+const socket = io();   // connects to same host:port automatically
 
 // ── Persistent identity ──
 let myId = localStorage.getItem('bingo_id');
@@ -14,24 +15,23 @@ if (!myId) {
 }
 
 // ── Session state ──
-let myName       = localStorage.getItem('bingo_name') || '';
-let myColor      = '#fff';
-let currentRoom  = null;
-let isHost       = false;
-let myCard       = [];
-let gs           = 5;
-let autoMark     = false;
-let pollInterval = null;
+let myName      = localStorage.getItem('bingo_name') || '';
+let myColor     = '#fff';
+let currentRoom = null;
+let isHost      = false;
+let myCard      = [];
+let gs          = 5;
+let autoMark    = false;
 
 // ── Welcome screen state ──
-let wGS        = 5;
-let wPublic    = true;
-let pendingJoin = null;   // {code, hasPassword} — set before opening pw modal
+let wGS         = 5;
+let wPublic     = true;
+let pendingJoin = null;   // {code} — set before opening pw modal
 
 // ── Lobby host state ──
-let hGS             = 5;
-let hPublic         = true;
-let hPwEnabled      = false;
+let hGS              = 5;
+let hPublic          = true;
+let hPwEnabled       = false;
 let settingsDebounce = null;
 
 // ── Setup state ──
@@ -53,8 +53,122 @@ let _creating     = false;
 let _joining      = false;
 let _starting     = false;
 
-// Heartbeat — keeps player marked as online
-let heartbeatInterval = null;
+
+// ════════════════════════════════════════
+//  Socket helpers
+// ════════════════════════════════════════
+
+/**
+ * Emit a socket event and return a Promise that resolves with
+ * the server acknowledgement, or {} after a 6-second timeout.
+ */
+function socketAction(event, data) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve({}), 6000);
+    socket.emit(event, data, ack => {
+      clearTimeout(timer);
+      resolve(ack || {});
+    });
+  });
+}
+
+/** Join the SocketIO room so we receive room_update broadcasts. */
+function joinSocketRoom(code) {
+  socket.emit('join_socket_room', { code, id: myId });
+}
+
+/**
+ * Route an incoming room_update to the correct UI handler —
+ * mirrors the routing logic that was previously in the poll loop.
+ */
+function routeRoomUpdate(room) {
+  _room = room;
+
+  const inLobby = document.getElementById('lobbyScreen').classList.contains('active');
+  const inSetup = document.getElementById('setupScreen').classList.contains('active');
+  const inGame  = document.getElementById('gameScreen').classList.contains('active');
+  const winOpen = document.getElementById('winOverlay').classList.contains('show');
+
+  // Safety: if we're no longer in the player list the server will send 'kicked'
+  if (!room.players.find(p => p.id === myId)) return;
+
+  if (room.status === 'lobby') {
+    if (inLobby) {
+      gs = room.gridSize;
+      renderLobbyPlayers(room);
+      // Sync lobby meta for everyone — host may have toggled public/password
+      const meta = document.getElementById('lobbyMeta');
+      meta.textContent = (room.public ? '🌐 Public' : '🔒 Private')
+        + (room.hasPassword ? ' · Password protected' : '');
+      // Sync host settings panel if host
+      if (isHost) {
+        hGS = room.gridSize; hPublic = room.public; hPwEnabled = room.hasPassword;
+        syncHgsDisplay(); syncLobbyToggles();
+      }
+    } else if (inSetup || inGame || winOpen) {
+      // Host reset — everyone returns to lobby
+      document.getElementById('winOverlay').classList.remove('show');
+      myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
+      gs = room.gridSize;
+      showLobby(currentRoom, room);
+    }
+  } else if (room.status === 'setup') {
+    if (inLobby) { gs = room.gridSize; showSetup(room); }
+  } else if (room.status === 'playing') {
+    if (inSetup && myCard.length > 0) showGame(room);
+    else if (inGame)                  updateGame(room);
+  } else if (room.status === 'ended') {
+    if (inGame && !winOpen) updateGame(room);
+    else if (inSetup)       showWin(room);
+  }
+}
+
+/** Update the connection-status bar on all screens. */
+function setStatusBar(connected) {
+  const html = connected
+    ? '<span class="ping"></span>Connected'
+    : '<span class="ping" style="background:var(--a1)"></span>Reconnecting…';
+  document.querySelectorAll('.status-bar').forEach(b => b.innerHTML = html);
+}
+
+
+// ════════════════════════════════════════
+//  Socket event listeners
+// ════════════════════════════════════════
+
+socket.on('connect', () => {
+  setStatusBar(true);
+  // Re-join the SocketIO room after a reconnection
+  if (currentRoom) joinSocketRoom(currentRoom);
+});
+
+socket.on('disconnect', () => {
+  setStatusBar(false);
+});
+
+socket.on('room_update', room => {
+  routeRoomUpdate(room);
+});
+
+socket.on('kicked', () => {
+  currentRoom = null; isHost = false; myCard = [];
+  document.getElementById('winOverlay').classList.remove('show');
+  showScreen('welcomeScreen');
+  loadRooms();
+  showToast('You were removed from the room');
+});
+
+socket.on('room_closed', () => {
+  currentRoom = null; isHost = false; myCard = [];
+  document.getElementById('winOverlay').classList.remove('show');
+  showScreen('welcomeScreen');
+  loadRooms();
+  showToast('Room closed — returning to main menu');
+});
+
+socket.on('error_msg', ({ message }) => {
+  showToast(message || 'Server error');
+});
 
 
 // ════════════════════════════════════════
@@ -69,7 +183,7 @@ window.addEventListener('load', () => {
   document.getElementById('playerName').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
       const activeTab = document.querySelector('.tab-btn.active');
-      if (activeTab && activeTab.textContent.includes('Create')) createRoom();
+      if (activeTab && activeTab.dataset.tab === 'create') createRoom();
       else joinByCode();
     }
   });
@@ -83,17 +197,17 @@ window.addEventListener('load', () => {
 
 
 // ════════════════════════════════════════
-//  API
+//  HTTP API (pre-room endpoints only)
 // ════════════════════════════════════════
 
-async function apiCall(path, method = 'GET', body = null) {
+async function apiCall(path, method = 'GET', body = null, silent = false) {
   try {
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(API + path, opts);
     return await res.json();
   } catch {
-    showToast('Server unreachable — is Flask running?');
+    if (!silent) showToast('Server unreachable — is Flask running?');
     return null;
   }
 }
@@ -118,10 +232,9 @@ function togglePwVis(inputId, btn) {
 // ════════════════════════════════════════
 
 function openExitModal(title, body, onConfirm) {
-  document.getElementById('exitModalTitle').textContent   = title;
-  document.getElementById('exitModalBody').textContent    = body;
+  document.getElementById('exitModalTitle').textContent = title;
+  document.getElementById('exitModalBody').textContent  = body;
   const btn = document.getElementById('exitModalConfirm');
-  // Replace onclick so old handlers don't stack
   btn.onclick = () => { closeExitModal(); onConfirm(); };
   document.getElementById('exitModal').classList.add('show');
 }
@@ -130,39 +243,33 @@ function closeExitModal() {
   document.getElementById('exitModal').classList.remove('show');
 }
 
-async function exitLobby() {
+function exitLobby() {
   const msg = isHost
     ? 'You are the host. Leaving will close the room for everyone.'
     : 'You will be removed from the lobby.';
-  openExitModal('Exit to Main Menu?', msg, async () => {
-    if (currentRoom) await apiCall(`/api/room/${currentRoom}/leave`, 'POST', { id: myId });
-    stopHeartbeat();
-    clearInterval(pollInterval); pollInterval = null;
+  openExitModal('Exit to Main Menu?', msg, () => {
+    socket.emit('leave_room', { id: myId, code: currentRoom });
     currentRoom = null; isHost = false;
     showScreen('welcomeScreen');
     loadRooms();
   });
 }
 
-async function exitGame() {
+function exitGame() {
   const msg = isHost
     ? 'You are the host. Leaving will close the room and end the game for everyone.'
     : 'You will leave the game. The game will continue without you.';
-  openExitModal('Exit to Main Menu?', msg, async () => {
-    if (currentRoom) await apiCall(`/api/room/${currentRoom}/leave`, 'POST', { id: myId });
-    stopHeartbeat();
-    clearInterval(pollInterval); pollInterval = null;
+  openExitModal('Exit to Main Menu?', msg, () => {
+    socket.emit('leave_room', { id: myId, code: currentRoom });
     currentRoom = null; isHost = false; myCard = [];
     showScreen('welcomeScreen');
     loadRooms();
   });
 }
 
-async function winMainMenu() {
+function winMainMenu() {
   document.getElementById('winOverlay').classList.remove('show');
-  if (currentRoom) await apiCall(`/api/room/${currentRoom}/leave`, 'POST', { id: myId });
-  stopHeartbeat();
-  clearInterval(pollInterval); pollInterval = null;
+  socket.emit('leave_room', { id: myId, code: currentRoom });
   currentRoom = null; isHost = false; myCard = [];
   showScreen('welcomeScreen');
   loadRooms();
@@ -174,33 +281,10 @@ async function winMainMenu() {
 // ════════════════════════════════════════
 
 async function kickPlayer(targetId) {
-  const data = await apiCall(`/api/room/${currentRoom}/kick`, 'POST',
-    { id: myId, targetId });
-  if (!data || data.error) return showToast(data?.error || 'Could not kick player');
-  // Sync local grid-size state in case it changed before the kick response arrived
-  if (data.gridSize) { gs = data.gridSize; hGS = data.gridSize; syncHgsDisplay(); }
-  renderLobbyPlayers(data);
+  const ack = await socketAction('kick_player', { id: myId, code: currentRoom, targetId });
+  if (ack.error) showToast(ack.error);
+  // Room update arrives via room_update event — no manual re-render needed
 }
-
-
-// ════════════════════════════════════════
-//  Heartbeat
-// ════════════════════════════════════════
-
-function startHeartbeat() {
-  stopHeartbeat();
-  heartbeatInterval = setInterval(async () => {
-    if (!currentRoom) return stopHeartbeat();
-    await apiCall(`/api/room/${currentRoom}/heartbeat`, 'POST', { id: myId });
-  }, 4000);
-}
-
-function stopHeartbeat() {
-  clearInterval(heartbeatInterval);
-  heartbeatInterval = null;
-}
-
-
 
 
 // ════════════════════════════════════════
@@ -218,7 +302,7 @@ function switchTab(name) {
 
 
 // ════════════════════════════════════════
-//  Room browser
+//  Room browser (HTTP)
 // ════════════════════════════════════════
 
 async function loadRooms() {
@@ -270,9 +354,9 @@ async function loadRooms() {
     }
 
     const joinBtn = document.createElement('button');
-    joinBtn.className      = 'btn btn-secondary btn-sm';
+    joinBtn.className       = 'btn btn-secondary btn-sm';
     joinBtn.style.marginTop = '0';
-    joinBtn.textContent    = 'Join';
+    joinBtn.textContent     = 'Join';
     joinBtn.addEventListener('click', () => startJoin(r.code, r.hasPassword));
 
     item.appendChild(info);
@@ -281,7 +365,6 @@ async function loadRooms() {
   });
 }
 
-// Entry point for all join attempts
 function startJoin(code, hasPassword) {
   const name = document.getElementById('playerName').value.trim();
   if (!name) return showToast('Enter your name first!');
@@ -302,7 +385,7 @@ function closePasswordModal() {
 
 function confirmPasswordJoin() {
   if (!pendingJoin) return;
-  const code = pendingJoin.code;           // save BEFORE closePasswordModal nulls pendingJoin
+  const code = pendingJoin.code;   // save BEFORE closePasswordModal nulls pendingJoin
   const pw   = document.getElementById('pwInput').value;
   closePasswordModal();
   doJoin(code, pw);
@@ -315,8 +398,7 @@ async function doJoin(code, password) {
   localStorage.setItem('bingo_name', myName = name);
 
   _joining = true;
-  const data = await apiCall(`/api/room/${code}/join`, 'POST',
-    { id: myId, name, password });
+  const data = await apiCall(`/api/room/${code}/join`, 'POST', { id: myId, name, password });
   _joining = false;
 
   if (!data || data.error) return showToast(data?.error || 'Could not join room');
@@ -327,6 +409,7 @@ async function doJoin(code, password) {
   const me    = data.room.players.find(p => p.id === myId);
   myColor     = me ? me.color : '#fff';
   showLobby(code, data.room);
+  joinSocketRoom(code);
 }
 
 
@@ -337,18 +420,15 @@ async function doJoin(code, password) {
 async function joinByCode() {
   const code = document.getElementById('joinCode').value.trim().toUpperCase();
   if (code.length !== 4) return showToast('Enter a 4-letter room code!');
-
-  // Fetch room to check if it has a password first
   const room = await apiCall(`/api/room/${code}`);
   if (!room || room.error) return showToast('Room not found!');
   if (room.status !== 'lobby') return showToast('Game already started!');
-
   startJoin(code, room.hasPassword);
 }
 
 
 // ════════════════════════════════════════
-//  Quick join
+//  Quick join (HTTP)
 // ════════════════════════════════════════
 
 async function quickJoin() {
@@ -364,7 +444,7 @@ async function quickJoin() {
 
 
 // ════════════════════════════════════════
-//  Create room
+//  Create room (HTTP)
 // ════════════════════════════════════════
 
 function togglePublic() {
@@ -379,7 +459,7 @@ async function createRoom() {
   if (!name) return showToast('Enter your name!');
   localStorage.setItem('bingo_name', myName = name);
 
-  const pw = wPublic ? '' : (document.getElementById('createPw').value.trim());
+  const pw = wPublic ? '' : document.getElementById('createPw').value.trim();
 
   _creating = true;
   const data = await apiCall('/api/room', 'POST', {
@@ -399,6 +479,7 @@ async function createRoom() {
   hPublic     = data.room.public;
   hPwEnabled  = data.room.hasPassword;
   showLobby(data.code, data.room);
+  joinSocketRoom(data.code);
 }
 
 function changeGS(delta) {
@@ -406,6 +487,7 @@ function changeGS(delta) {
   document.getElementById('gsDisp').textContent = `${wGS}×${wGS}`;
   document.getElementById('gsMax').textContent  = wGS * wGS;
 }
+
 function updateWGS() {
   document.getElementById('gsDisp').textContent = `${wGS}×${wGS}`;
   document.getElementById('gsMax').textContent  = wGS * wGS;
@@ -432,12 +514,11 @@ function showLobby(code, room) {
     + (room.hasPassword ? ' · Password protected' : '');
 
   document.getElementById('hostSettings').style.display = isHost ? 'block' : 'none';
-  document.getElementById('hostStart').style.display     = isHost ? 'block' : 'none';
-  document.getElementById('guestWait').style.display     = isHost ? 'none'  : 'block';
+  document.getElementById('hostStart').style.display    = isHost ? 'block' : 'none';
+  document.getElementById('guestWait').style.display    = isHost ? 'none'  : 'block';
 
   renderLobbyPlayers(room);
-  startPolling();
-  startHeartbeat();
+  // Note: no startPolling / startHeartbeat — socket handles all of that now
 }
 
 function renderLobbyPlayers(room) {
@@ -446,7 +527,6 @@ function renderLobbyPlayers(room) {
   room.players.forEach(p => {
     const li = document.createElement('li');
 
-    // Presence dot
     const dot = document.createElement('span');
     dot.className = 'presence-dot ' + (p.online !== false ? 'online' : 'offline');
     dot.title     = p.online !== false ? 'Online' : 'Offline';
@@ -472,7 +552,6 @@ function renderLobbyPlayers(room) {
       b.className = 'badge badge-you'; b.textContent = 'You';
       li.appendChild(b);
     } else if (isHost) {
-      // Kick button — only host sees it, only on non-host players
       const kb = document.createElement('button');
       kb.className   = 'kick-btn';
       kb.textContent = '✕';
@@ -484,6 +563,7 @@ function renderLobbyPlayers(room) {
     ul.appendChild(li);
   });
 }
+
 
 // ── Lobby host setting helpers ──
 
@@ -502,16 +582,13 @@ function pushSettings() {
   clearTimeout(settingsDebounce);
   settingsDebounce = setTimeout(async () => {
     const pw = hPwEnabled
-      ? (document.getElementById('lobbyPwInput').value.trim())
+      ? document.getElementById('lobbyPwInput').value.trim()
       : '';
-    const data = await apiCall(`/api/room/${currentRoom}/settings`, 'POST', {
-      id: myId, gridSize: hGS, public: hPublic, password: pw
+    const ack = await socketAction('update_settings', {
+      id: myId, code: currentRoom, gridSize: hGS, public: hPublic, password: pw
     });
-    if (data && !data.error) {
-      const meta = document.getElementById('lobbyMeta');
-      meta.textContent = (data.public ? '🌐 Public' : '🔒 Private')
-        + (data.hasPassword ? ' · Password protected' : '');
-    }
+    if (ack && ack.error) showToast(ack.error);
+    // room_update event will keep the UI in sync
   }, 400);
 }
 
@@ -535,16 +612,17 @@ function toggleLobbyPassword() {
 }
 
 function updateLobbyPassword() {
-  // pushSettings already debounces at 400ms — no need to wrap it again
+  // pushSettings already debounces at 400ms
   pushSettings();
 }
 
 async function startGame() {
   if (_starting) return;
   _starting = true;
-  const data = await apiCall(`/api/room/${currentRoom}/start`, 'POST', { id: myId });
+  const ack = await socketAction('start_game', { id: myId, code: currentRoom });
   _starting = false;
-  if (!data || data.error) showToast(data?.error || 'Error starting game');
+  if (ack && ack.error) showToast(ack.error);
+  // Success: room_update event transitions everyone to setup screen
 }
 
 
@@ -561,8 +639,7 @@ function showSetup(room) {
   cardSubmitted = false;
   selPoolNum    = null;
   _submitting   = false;
-  // Reset DOM visibility — submitCard() hides readyBtn and shows setupWait;
-  // those inline styles persist across rounds so we must explicitly undo them.
+  // Reset DOM visibility that submitCard() sets — these persist across rounds
   document.getElementById('readyBtn').style.display  = 'block';
   document.getElementById('setupWait').style.display = 'none';
   renderSetupGrid(); renderNumPool(); checkReadyBtn();
@@ -585,8 +662,8 @@ function renderSetupGrid() {
 }
 
 function renderNumPool() {
-  const pool   = document.getElementById('numPool');
-  const total  = gs * gs;
+  const pool    = document.getElementById('numPool');
+  const total   = gs * gs;
   const usedSet = new Set(setupCard.filter(x => x > 0));
   pool.innerHTML = '';
   for (let num = 1; num <= total; num++) {
@@ -621,9 +698,9 @@ function clickSetupCell(idx) {
 }
 
 function randomFill() {
-  const total  = gs * gs;
+  const total   = gs * gs;
   const usedSet = new Set(setupCard.filter(x => x > 0));
-  const rem    = [];
+  const rem     = [];
   for (let i = 1; i <= total; i++) if (!usedSet.has(i)) rem.push(i);
   for (let i = rem.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -654,17 +731,20 @@ async function submitCard() {
   document.getElementById('readyBtn').style.display  = 'none';
   document.getElementById('setupWait').style.display = 'block';
 
-  const data = await apiCall(`/api/room/${currentRoom}/submit-card`, 'POST',
-    { id: myId, card: myCard });
+  const ack = await socketAction('submit_card', { id: myId, code: currentRoom, card: myCard });
   _submitting = false;
 
-  if (!data || data.error) {
+  // Treat a timeout (empty ack {}) the same as an error — roll back the UI
+  // so the player isn't permanently stuck on the "Waiting…" screen.
+  if (!ack || ack.error || Object.keys(ack).length === 0) {
     cardSubmitted = false;
     document.getElementById('readyBtn').style.display  = 'block';
     document.getElementById('setupWait').style.display = 'none';
-    return showToast(data?.error || 'Error submitting');
+    if (ack && ack.error) showToast(ack.error);
+    else if (!ack || Object.keys(ack).length === 0) showToast('Server timed out — please try again');
+    return;
   }
-  if (data.status === 'playing') showGame(data);
+  // Success: room_update event will transition to game screen
 }
 
 
@@ -679,12 +759,15 @@ function showGame(room) {
   document.getElementById('gPlayerPill').textContent = '👤 ' + myName;
   lastCalledLen = 0; lastChatLen = 0; lastRankLen = 0;
   myPrevLines = 0; selPickNum = null; _marking = false;
-  startHeartbeat();   // ensure heartbeat runs even when we arrive here via poll (not showLobby)
+  // Reset stale UI state from the previous game
+  document.getElementById('rankSec').style.display  = 'none';
+  document.getElementById('rankList').innerHTML      = '';
+  document.getElementById('lastBox').style.display   = 'none';
+  document.getElementById('calledChips').innerHTML   = '';
   buildHeader(); buildGrid(room); updateGame(room);
 }
 
 function cellPx() {
-  // On desktop side-by-side, board max ~380px; on mobile full width
   const avail = window.innerWidth >= 900
     ? Math.min(380, window.innerWidth - 320)
     : window.innerWidth - 40;
@@ -736,14 +819,15 @@ function clickCell(num) {
 async function doMark(num) {
   if (_marking) return;
   _marking = true;
-  const data = await apiCall(`/api/room/${currentRoom}/mark`, 'POST', { id: myId, number: num });
+  const ack = await socketAction('mark_number', { id: myId, code: currentRoom, number: num });
   _marking = false;
-  if (data && !data.error) updateGame(data);
+  if (ack && ack.error) showToast(ack.error);
+  // Success: room_update event handles the UI update
 }
 
 function updateGame(room) {
   _room = room;
-  const me      = room.players.find(p => p.id === myId);
+  const me = room.players.find(p => p.id === myId);
   if (!me) return;
 
   const called    = room.calledNumbers;
@@ -761,7 +845,7 @@ function updateGame(room) {
   });
 
   // ── Auto-mark ──
-  if (autoMark && called.length > lastCalledLen) {
+  if (autoMark && room.status === 'playing' && called.length > lastCalledLen) {
     const n = called.slice(lastCalledLen).find(
       v => myCard.includes(v) && !me.markedNumbers.includes(v)
     );
@@ -809,8 +893,8 @@ function updateGame(room) {
   room.players.forEach(p => {
     const row  = document.createElement('div'); row.className = 'prow';
     const nm   = document.createElement('div'); nm.className = 'pname';
-    nm.style.color  = p.color;
-    nm.textContent  = p.name + (p.id === myId ? ' ★' : '');
+    nm.style.color = p.color;
+    nm.textContent = p.name + (p.id === myId ? ' ★' : '');
     const pips = document.createElement('div'); pips.className = 'pips';
     for (let i = 0; i < 5; i++) {
       const pip = document.createElement('div');
@@ -819,7 +903,7 @@ function updateGame(room) {
     }
     const cnt = document.createElement('span');
     cnt.style.cssText = 'font-size:.68rem;color:var(--muted)';
-    cnt.textContent   = `${Math.min(p.bingoLines,5)}/5`;
+    cnt.textContent   = `${Math.min(p.bingoLines, 5)}/5`;
     row.appendChild(nm); row.appendChild(pips); row.appendChild(cnt);
     pl.appendChild(row);
   });
@@ -846,8 +930,10 @@ function updateGame(room) {
     room.rankings.forEach(r => {
       const row = document.createElement('div'); row.className = 'rrow';
       const m   = document.createElement('span'); m.textContent = medals[r.rank-1] || '#'+r.rank;
-      const nm  = document.createElement('span'); nm.style.cssText=`color:${r.color};flex:1`; nm.textContent=r.name;
-      const ln  = document.createElement('span'); ln.style.cssText='font-size:.68rem;color:var(--muted)'; ln.textContent=`${r.bingoLines} lines`;
+      const nm  = document.createElement('span');
+      nm.style.cssText = `color:${r.color};flex:1`; nm.textContent = r.name;
+      const ln  = document.createElement('span');
+      ln.style.cssText = 'font-size:.68rem;color:var(--muted)'; ln.textContent = `${r.bingoLines} lines`;
       row.appendChild(m); row.appendChild(nm); row.appendChild(ln);
       rl.appendChild(row);
     });
@@ -857,19 +943,18 @@ function updateGame(room) {
   const pm = document.getElementById('playersMini'); pm.innerHTML = '';
   room.players.forEach(p => {
     const row = document.createElement('div');
-    row.style.cssText='display:flex;align-items:center;gap:.38rem;font-size:.76rem;padding:.15rem 0;border-bottom:1px solid rgba(255,255,255,.04)';
+    row.style.cssText = 'display:flex;align-items:center;gap:.38rem;font-size:.76rem;padding:.15rem 0;border-bottom:1px solid rgba(255,255,255,.04)';
     const dot = document.createElement('div');
-    // Use green/grey presence colour (same logic as lobby list)
     const onlineColor = p.online !== false ? 'var(--a5)' : 'var(--muted)';
-    dot.style.cssText=`width:7px;height:7px;border-radius:50%;background:${onlineColor};flex-shrink:0;opacity:${p.online !== false ? '1' : '0.45'}`;
+    dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${onlineColor};flex-shrink:0;opacity:${p.online !== false ? '1' : '0.45'}`;
     dot.title = p.online !== false ? 'Online' : 'Offline';
     const nm = document.createElement('span');
-    nm.style.cssText=`color:${p.color};flex:1`; nm.textContent=p.name+(p.id===myId?' (you)':'');
+    nm.style.cssText = `color:${p.color};flex:1`; nm.textContent = p.name + (p.id === myId ? ' (you)' : '');
     const sc = document.createElement('span');
-    sc.style.color='var(--muted)'; sc.textContent=`${p.bingoLines}/5`;
+    sc.style.color = 'var(--muted)'; sc.textContent = `${p.bingoLines}/5`;
     row.appendChild(dot); row.appendChild(nm); row.appendChild(sc);
     if (p.rank) {
-      const rk=document.createElement('span'); rk.style.color='var(--a4)'; rk.textContent='🏆'+p.rank;
+      const rk = document.createElement('span'); rk.style.color = 'var(--a4)'; rk.textContent = '🏆' + p.rank;
       row.appendChild(rk);
     }
     pm.appendChild(row);
@@ -880,7 +965,7 @@ function updateGame(room) {
     const msgs = document.getElementById('chatMsgs');
     room.chat.slice(lastChatLen).forEach(m => {
       const div = document.createElement('div'); div.className = 'cmsg';
-      const cn  = document.createElement('span'); cn.className='cn'; cn.style.color=m.color;
+      const cn  = document.createElement('span'); cn.className = 'cn'; cn.style.color = m.color;
       cn.textContent = m.name + ':';
       div.appendChild(cn);
       div.appendChild(document.createTextNode(' ' + m.message));
@@ -922,10 +1007,10 @@ async function confirmCall() {
   if (!selPickNum || _calling) return;
   const num = selPickNum; selPickNum = null; _calling = true;
   document.getElementById('callBar').style.display = 'none';
-  const data = await apiCall(`/api/room/${currentRoom}/call`, 'POST', { id: myId, number: num });
+  const ack = await socketAction('call_number', { id: myId, code: currentRoom, number: num });
   _calling = false;
-  if (!data || data.error) return showToast(data?.error || 'Error');
-  updateGame(data);
+  if (ack && ack.error) showToast(ack.error);
+  // Success: room_update event handles the UI update
 }
 
 function toggleAutoMark() {
@@ -945,12 +1030,12 @@ function toggleAutoMark() {
 //  Chat
 // ════════════════════════════════════════
 
-async function sendChat() {
+function sendChat() {
   const inp = document.getElementById('chatIn');
   const msg = inp.value.trim().slice(0, 200);
   if (!msg) return;
   inp.value = '';
-  await apiCall(`/api/room/${currentRoom}/chat`, 'POST', { id: myId, message: msg });
+  socket.emit('send_chat', { id: myId, code: currentRoom, message: msg });
 }
 
 
@@ -959,16 +1044,18 @@ async function sendChat() {
 // ════════════════════════════════════════
 
 function showWin(room) {
-  clearInterval(pollInterval); pollInterval = null;
   document.getElementById('winOverlay').classList.add('show');
   const fl = document.getElementById('finalList'); fl.innerHTML = '';
   const medals = ['🥇','🥈','🥉'];
   room.rankings.forEach(r => {
     const item = document.createElement('div'); item.className = 'fitem';
-    const med  = document.createElement('div'); med.className='fmed'; med.textContent=medals[r.rank-1]||'#'+r.rank;
-    const nm   = document.createElement('div'); nm.style.cssText=`color:${r.color};flex:1;font-weight:700`;
-    nm.textContent = r.name + (r.id===myId?' (you)':'');
-    const ln   = document.createElement('div'); ln.style.cssText='font-size:.8rem;color:var(--muted)';
+    const med  = document.createElement('div'); med.className = 'fmed';
+    med.textContent = medals[r.rank-1] || '#' + r.rank;
+    const nm = document.createElement('div');
+    nm.style.cssText = `color:${r.color};flex:1;font-weight:700`;
+    nm.textContent = r.name + (r.id === myId ? ' (you)' : '');
+    const ln = document.createElement('div');
+    ln.style.cssText = 'font-size:.8rem;color:var(--muted)';
     ln.textContent = `${r.bingoLines} lines`;
     item.appendChild(med); item.appendChild(nm); item.appendChild(ln);
     fl.appendChild(item);
@@ -981,89 +1068,16 @@ async function playAgain() {
   document.getElementById('winOverlay').classList.remove('show');
 
   if (isHost) {
-    // Host resets the room and goes straight to lobby
-    const data = await apiCall(`/api/room/${currentRoom}/reset`, 'POST', { id: myId });
-    if (!data || data.error) return showToast(data?.error || 'Error resetting room');
+    const ack = await socketAction('reset_room', { id: myId, code: currentRoom });
+    if (ack && ack.error) return showToast(ack.error);
     myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
-    showLobby(currentRoom, data);
+    // room_update event will broadcast lobby status → routeRoomUpdate → showLobby
   } else {
-    // Guest: reset counters and navigate to lobby screen to wait.
-    // Staying on the game screen caused a loop:
-    //   poll sees ended+inGame → updateGame → showWin → poll killed → stuck.
-    // By moving to lobby, the poll does nothing until host resets
-    // (status 'ended' + inLobby has no handler), then when status flips to
-    // 'lobby' the poll renders the updated player list automatically.
+    // Guest navigates to lobby to wait for host reset.
+    // Staying on game screen caused a showWin loop — lobby is the safe waiting screen.
     myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
-    showLobby(currentRoom, _room);   // _room = last known room state
+    showLobby(currentRoom, _room);
   }
-}
-
-
-// ════════════════════════════════════════
-//  Polling
-// ════════════════════════════════════════
-
-function startPolling() {
-  clearInterval(pollInterval);
-  pollInterval = setInterval(async () => {
-    if (!currentRoom) return;
-    const room = await apiCall(`/api/room/${currentRoom}`);
-
-    // Room deleted (host left, or 404) — kick everyone to main menu
-    if (!room || room.error) {
-      const inGame  = document.getElementById('gameScreen').classList.contains('active');
-      const inLobby = document.getElementById('lobbyScreen').classList.contains('active');
-      const inSetup = document.getElementById('setupScreen').classList.contains('active');
-      const winOpen = document.getElementById('winOverlay').classList.contains('show');
-      if (inGame || inLobby || inSetup || winOpen) {
-        stopHeartbeat();
-        clearInterval(pollInterval); pollInterval = null;
-        document.getElementById('winOverlay').classList.remove('show');
-        currentRoom = null; isHost = false; myCard = [];
-        showScreen('welcomeScreen');
-        loadRooms();
-        showToast('Room closed — returning to main menu');
-      }
-      return;
-    }
-
-    const inLobby = document.getElementById('lobbyScreen').classList.contains('active');
-    const inSetup = document.getElementById('setupScreen').classList.contains('active');
-    const inGame  = document.getElementById('gameScreen').classList.contains('active');
-    const winOpen = document.getElementById('winOverlay').classList.contains('show');
-
-    // Detect if WE were kicked (player no longer in room)
-    if (!room.players.find(p => p.id === myId)) {
-      stopHeartbeat();
-      clearInterval(pollInterval); pollInterval = null;
-      document.getElementById('winOverlay').classList.remove('show');
-      currentRoom = null; isHost = false; myCard = [];
-      showScreen('welcomeScreen');
-      loadRooms();
-      showToast('You were removed from the room');
-      return;
-    }
-
-    if (room.status === 'lobby') {
-      if (inLobby) {
-        renderLobbyPlayers(room); gs = room.gridSize;
-      } else if (inSetup || inGame || winOpen) {
-        // Host reset — everyone returns to lobby
-        document.getElementById('winOverlay').classList.remove('show');
-        myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
-        gs = room.gridSize;
-        showLobby(currentRoom, room);
-      }
-    } else if (room.status === 'setup') {
-      if (inLobby) { gs = room.gridSize; showSetup(room); }
-    } else if (room.status === 'playing') {
-      if (inSetup && myCard.length > 0) showGame(room);
-      else if (inGame)                  updateGame(room);
-    } else if (room.status === 'ended') {
-      if (inGame && !winOpen) updateGame(room);
-      else if (inSetup)       showWin(room);
-    }
-  }, 1500);
 }
 
 
@@ -1076,10 +1090,12 @@ function showScreen(id) {
   document.getElementById(id).classList.add('active');
 }
 
+let _toastTimeout = null;
 function showToast(msg) {
   const t = document.getElementById('toast');
+  clearTimeout(_toastTimeout);
   t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2800);
+  _toastTimeout = setTimeout(() => { t.classList.remove('show'); _toastTimeout = null; }, 2800);
 }
 
 function showRankPop(msg) {
@@ -1093,7 +1109,7 @@ function launchConfetti() {
   c.innerHTML = '';
   const cols = ['#f72585','#4cc9f0','#06d6a0','#f8961e','#7209b7','#fff'];
   for (let i = 0; i < 100; i++) {
-    const el = document.createElement('div');
+    const el  = document.createElement('div');
     const col = cols[Math.floor(Math.random() * cols.length)];
     const sz  = Math.random() * 9 + 5;
     el.style.cssText = [
