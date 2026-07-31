@@ -46,6 +46,7 @@ let lastCalledLen = 0;
 let lastChatLen   = 0;
 let lastRankLen   = 0;
 let myPrevLines   = 0;
+let myPrevRank    = null;  // tracks whether the "you got ranked" popup already fired for this rank
 let _room         = null;
 let _marking      = false;
 let _calling      = false;
@@ -58,16 +59,20 @@ let _starting     = false;
 //  Socket helpers
 // ════════════════════════════════════════
 
+// Sentinel returned when a socket ack times out — distinct from a real empty response
+const _TIMEOUT = Object.freeze({ _timeout: true });
+
 /**
  * Emit a socket event and return a Promise that resolves with
- * the server acknowledgement, or {} after a 6-second timeout.
+ * the server acknowledgement, or _TIMEOUT after 8 seconds.
+ * Server always returns {ok: true} on success or {error: '...'} on failure.
  */
 function socketAction(event, data) {
   return new Promise(resolve => {
-    const timer = setTimeout(() => resolve({}), 6000);
+    const timer = setTimeout(() => resolve(_TIMEOUT), 8000);
     socket.emit(event, data, ack => {
       clearTimeout(timer);
-      resolve(ack || {});
+      resolve(ack || _TIMEOUT);
     });
   });
 }
@@ -108,7 +113,7 @@ function routeRoomUpdate(room) {
     } else if (inSetup || inGame || winOpen) {
       // Host reset — everyone returns to lobby
       document.getElementById('winOverlay').classList.remove('show');
-      myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
+      myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0; myPrevRank=null;
       gs = room.gridSize;
       showLobby(currentRoom, room);
     }
@@ -117,9 +122,27 @@ function routeRoomUpdate(room) {
   } else if (room.status === 'playing') {
     if (inSetup && myCard.length > 0) showGame(room);
     else if (inGame)                  updateGame(room);
+    else if (inLobby) {
+      // Mid-game reconnect: player reloaded while game was in progress.
+      // myCard was lost on reload — we can't reconstruct the board, so send
+      // them back to main menu gracefully with an explanation.
+      socket.emit('leave_room', { id: myId, code: currentRoom });
+      currentRoom = null; isHost = false; myCard = [];
+      showScreen('welcomeScreen');
+      loadRooms();
+      showToast('Game already in progress — returning to main menu');
+    }
   } else if (room.status === 'ended') {
-    if (inGame && !winOpen) updateGame(room);
-    else if (inSetup)       showWin(room);
+    if (inGame) {
+      updateGame(room);          // update board, chips, rankings panel
+      if (!winOpen) showWin(room); // always show overlay after board is updated
+    } else if (inSetup) {
+      showWin(room);
+    } else if (inLobby) {
+      // Reconnected after game ended — show win overlay directly
+      showScreen('gameScreen');
+      showWin(room);
+    }
   }
 }
 
@@ -267,12 +290,16 @@ function exitGame() {
   });
 }
 
-function winMainMenu() {
-  document.getElementById('winOverlay').classList.remove('show');
-  socket.emit('leave_room', { id: myId, code: currentRoom });
-  currentRoom = null; isHost = false; myCard = [];
-  showScreen('welcomeScreen');
-  loadRooms();
+function exitSetup() {
+  const msg = isHost
+    ? 'You are the host. Leaving will close the room for everyone.'
+    : 'You will leave before the game starts. Other players can continue.';
+  openExitModal('Exit to Main Menu?', msg, () => {
+    socket.emit('leave_room', { id: myId, code: currentRoom });
+    currentRoom = null; isHost = false; myCard = [];
+    showScreen('welcomeScreen');
+    loadRooms();
+  });
 }
 
 
@@ -283,6 +310,7 @@ function winMainMenu() {
 async function kickPlayer(targetId) {
   const ack = await socketAction('kick_player', { id: myId, code: currentRoom, targetId });
   if (ack.error) showToast(ack.error);
+  else if (ack._timeout) showToast('Server timed out — please try again');
   // Room update arrives via room_update event — no manual re-render needed
 }
 
@@ -587,7 +615,7 @@ function pushSettings() {
     const ack = await socketAction('update_settings', {
       id: myId, code: currentRoom, gridSize: hGS, public: hPublic, password: pw
     });
-    if (ack && ack.error) showToast(ack.error);
+    if (ack.error) showToast(ack.error);
     // room_update event will keep the UI in sync
   }, 400);
 }
@@ -621,7 +649,8 @@ async function startGame() {
   _starting = true;
   const ack = await socketAction('start_game', { id: myId, code: currentRoom });
   _starting = false;
-  if (ack && ack.error) showToast(ack.error);
+  if (ack.error) showToast(ack.error);
+  else if (ack._timeout) showToast('Server timed out — please try again');
   // Success: room_update event transitions everyone to setup screen
 }
 
@@ -734,17 +763,20 @@ async function submitCard() {
   const ack = await socketAction('submit_card', { id: myId, code: currentRoom, card: myCard });
   _submitting = false;
 
-  // Treat a timeout (empty ack {}) the same as an error — roll back the UI
-  // so the player isn't permanently stuck on the "Waiting…" screen.
-  if (!ack || ack.error || Object.keys(ack).length === 0) {
+  if (ack._timeout) {
+    // True network timeout — roll back so player can retry
     cardSubmitted = false;
     document.getElementById('readyBtn').style.display  = 'block';
     document.getElementById('setupWait').style.display = 'none';
-    if (ack && ack.error) showToast(ack.error);
-    else if (!ack || Object.keys(ack).length === 0) showToast('Server timed out — please try again');
-    return;
+    return showToast('Server timed out — please try again');
   }
-  // Success: room_update event will transition to game screen
+  if (ack.error) {
+    cardSubmitted = false;
+    document.getElementById('readyBtn').style.display  = 'block';
+    document.getElementById('setupWait').style.display = 'none';
+    return showToast(ack.error);
+  }
+  // ack.ok === true: room_update event will transition to game screen
 }
 
 
@@ -758,7 +790,7 @@ function showGame(room) {
   document.getElementById('gRoomCode').textContent   = currentRoom;
   document.getElementById('gPlayerPill').textContent = '👤 ' + myName;
   lastCalledLen = 0; lastChatLen = 0; lastRankLen = 0;
-  myPrevLines = 0; selPickNum = null; _marking = false;
+  myPrevLines = 0; myPrevRank = null; selPickNum = null; _marking = false;
   // Reset stale UI state from the previous game
   document.getElementById('rankSec').style.display  = 'none';
   document.getElementById('rankList').innerHTML      = '';
@@ -789,11 +821,39 @@ function buildHeader() {
   }
 }
 
+/**
+ * Returns a Set of card-index positions (0-based, row-major) that belong
+ * to at least one fully-marked row, column, or diagonal — mirrors the
+ * server's count_lines() line definitions exactly so the highlighted
+ * cells always match what the server actually counts as a completed line.
+ */
+function getWinningCellIndices(marked, gsSize) {
+  const win = new Set();
+  for (let r = 0; r < gsSize; r++) {
+    let complete = true;
+    for (let c = 0; c < gsSize; c++) if (!marked.has(myCard[r * gsSize + c])) { complete = false; break; }
+    if (complete) for (let c = 0; c < gsSize; c++) win.add(r * gsSize + c);
+  }
+  for (let c = 0; c < gsSize; c++) {
+    let complete = true;
+    for (let r = 0; r < gsSize; r++) if (!marked.has(myCard[r * gsSize + c])) { complete = false; break; }
+    if (complete) for (let r = 0; r < gsSize; r++) win.add(r * gsSize + c);
+  }
+  let d1 = true;
+  for (let i = 0; i < gsSize; i++) if (!marked.has(myCard[i * gsSize + i])) { d1 = false; break; }
+  if (d1) for (let i = 0; i < gsSize; i++) win.add(i * gsSize + i);
+  let d2 = true;
+  for (let i = 0; i < gsSize; i++) if (!marked.has(myCard[i * gsSize + (gsSize - 1 - i)])) { d2 = false; break; }
+  if (d2) for (let i = 0; i < gsSize; i++) win.add(i * gsSize + (gsSize - 1 - i));
+  return win;
+}
+
 function buildGrid(room) {
   const grid   = document.getElementById('gGrid');
   const me     = room.players.find(p => p.id === myId);
   const marked = new Set(me ? me.markedNumbers : []);
   const called = new Set(room.calledNumbers);
+  const winCells = getWinningCellIndices(marked, gs);
   const px     = cellPx();
   grid.style.gridTemplateColumns = `repeat(${gs}, ${px}px)`;
   grid.innerHTML = '';
@@ -801,7 +861,8 @@ function buildGrid(room) {
     const num  = myCard[i];
     const cell = document.createElement('div');
     cell.className    = 'gcell'
-      + (marked.has(num) ? ' marked' : called.has(num) ? ' called' : '');
+      + (marked.has(num) ? ' marked' + (winCells.has(i) ? ' winline' : '')
+                          : called.has(num) ? ' called' : '');
     cell.style.cssText = `width:${px}px;height:${px}px;font-size:${Math.max(9, Math.floor(px * .35))}px`;
     cell.textContent  = num;
     cell.dataset.i    = i;
@@ -821,8 +882,8 @@ async function doMark(num) {
   _marking = true;
   const ack = await socketAction('mark_number', { id: myId, code: currentRoom, number: num });
   _marking = false;
-  if (ack && ack.error) showToast(ack.error);
-  // Success: room_update event handles the UI update
+  if (ack.error) showToast(ack.error);
+  // Timeout silently ignored — auto-mark will retry on next call
 }
 
 function updateGame(room) {
@@ -836,20 +897,28 @@ function updateGame(room) {
   const px        = cellPx();
 
   // ── Grid ──
+  const winCells = getWinningCellIndices(marked, gs);
   document.querySelectorAll('.gcell').forEach(cell => {
-    const num = myCard[parseInt(cell.dataset.i)];
+    const idx = parseInt(cell.dataset.i);
+    const num = myCard[idx];
     cell.style.cssText = `width:${px}px;height:${px}px;font-size:${Math.max(9, Math.floor(px * .35))}px`;
-    if      (marked.has(num))    cell.className = 'gcell marked';
+    if      (marked.has(num))    cell.className = 'gcell marked' + (winCells.has(idx) ? ' winline' : '');
     else if (calledSet.has(num)) cell.className = 'gcell called';
     else                         cell.className = 'gcell';
   });
 
   // ── Auto-mark ──
+  // Mark every new matching number from this update, not just the first —
+  // a reconnect can deliver several newly-called numbers in one batch, and
+  // lastCalledLen advances past all of them regardless, so any after the
+  // first would otherwise never get auto-marked.
   if (autoMark && room.status === 'playing' && called.length > lastCalledLen) {
-    const n = called.slice(lastCalledLen).find(
+    const newMatches = called.slice(lastCalledLen).filter(
       v => myCard.includes(v) && !me.markedNumbers.includes(v)
     );
-    if (n !== undefined) doMark(n);
+    if (newMatches.length > 0) {
+      (async () => { for (const n of newMatches) await doMark(n); })();
+    }
   }
   lastCalledLen = called.length;
 
@@ -908,9 +977,13 @@ function updateGame(room) {
     pl.appendChild(row);
   });
 
-  // ── Rank popup for self ──
-  if (me.bingoLines > myPrevLines) {
-    showRankPop(me.rank ? `🏆 BINGO! You're #${me.rank}!` : `🎉 ${me.bingoLines}/5 lines!`);
+  // ── Rank popup for self (fires once per new milestone, not on every mark after) ──
+  if (me.rank !== null && me.rank !== myPrevRank) {
+    showRankPop(`🏆 BINGO! You're #${me.rank}!`);
+    myPrevRank  = me.rank;
+    myPrevLines = me.bingoLines;
+  } else if (me.rank === null && me.bingoLines > myPrevLines) {
+    showRankPop(`🎉 ${me.bingoLines}/5 lines!`);
     myPrevLines = me.bingoLines;
   }
 
@@ -974,11 +1047,6 @@ function updateGame(room) {
     msgs.scrollTop = msgs.scrollHeight;
     lastChatLen = room.chat.length;
   }
-
-  // ── Game over ──
-  if (room.status === 'ended'
-      && !document.getElementById('winOverlay').classList.contains('show'))
-    showWin(room);
 }
 
 function buildPicker(room) {
@@ -1009,7 +1077,8 @@ async function confirmCall() {
   document.getElementById('callBar').style.display = 'none';
   const ack = await socketAction('call_number', { id: myId, code: currentRoom, number: num });
   _calling = false;
-  if (ack && ack.error) showToast(ack.error);
+  if (ack.error) showToast(ack.error);
+  else if (ack._timeout) showToast('Server timed out — please try again');
   // Success: room_update event handles the UI update
 }
 
@@ -1044,40 +1113,106 @@ function sendChat() {
 // ════════════════════════════════════════
 
 function showWin(room) {
-  document.getElementById('winOverlay').classList.add('show');
-  const fl = document.getElementById('finalList'); fl.innerHTML = '';
-  const medals = ['🥇','🥈','🥉'];
-  room.rankings.forEach(r => {
-    const item = document.createElement('div'); item.className = 'fitem';
-    const med  = document.createElement('div'); med.className = 'fmed';
-    med.textContent = medals[r.rank-1] || '#' + r.rank;
+  const overlay = document.getElementById('winOverlay');
+  if (overlay.classList.contains('show')) return; // already showing
+
+  overlay.classList.add('show');
+
+  // ── Personalised header ──
+  const me = room.rankings.find(r => r.id === myId);
+  const ttl = document.getElementById('winTtl');
+  const sub = document.getElementById('winSub');
+
+  if (me) {
+    if (me.rank === 1) {
+      ttl.textContent = '🎉 BINGO!';
+      sub.textContent = 'You won! 🥇';
+    } else {
+      const medals = ['','🥇','🥈','🥉'];
+      ttl.textContent = 'Game Over!';
+      sub.textContent = `You finished ${medals[me.rank] || '#' + me.rank} — ${me.bingoLines} lines`;
+    }
+  } else {
+    ttl.textContent = 'Game Over!';
+    sub.textContent = 'Final Rankings';
+  }
+
+  // ── Full scoreboard ──
+  const fl = document.getElementById('finalList');
+  fl.innerHTML = '';
+  const allPlayers = [...room.players].sort((a, b) => {
+    // ranked players first (by rank), then unranked by bingoLines desc
+    if (a.rank !== null && b.rank !== null) return a.rank - b.rank;
+    if (a.rank !== null) return -1;
+    if (b.rank !== null) return 1;
+    return b.bingoLines - a.bingoLines;
+  });
+
+  const medals = ['', '🥇', '🥈', '🥉'];
+  allPlayers.forEach((p, idx) => {
+    const item = document.createElement('div');
+    item.className = 'fitem' + (p.id === myId ? ' fitem-me' : '');
+
+    const med = document.createElement('div');
+    med.className = 'fmed';
+    med.textContent = p.rank ? (medals[p.rank] || `#${p.rank}`) : `#${idx + 1}`;
+
     const nm = document.createElement('div');
-    nm.style.cssText = `color:${r.color};flex:1;font-weight:700`;
-    nm.textContent = r.name + (r.id === myId ? ' (you)' : '');
-    const ln = document.createElement('div');
-    ln.style.cssText = 'font-size:.8rem;color:var(--muted)';
-    ln.textContent = `${r.bingoLines} lines`;
-    item.appendChild(med); item.appendChild(nm); item.appendChild(ln);
+    nm.className = 'fname';
+    nm.style.color = p.color;
+    nm.textContent = p.name + (p.id === myId ? ' ★' : '');
+
+    const sc = document.createElement('div');
+    sc.className = 'fscore';
+    sc.textContent = `${Math.min(p.bingoLines, 5)}/5 lines`;
+
+    item.appendChild(med);
+    item.appendChild(nm);
+    item.appendChild(sc);
     fl.appendChild(item);
   });
-  const me = room.rankings.find(r => r.id === myId);
-  if (me && me.rank === 1) launchConfetti();
+
+  // ── Buttons: host vs guest ──
+  const hostBtns  = document.getElementById('winBtnsHost');
+  const guestBtns = document.getElementById('winBtnsGuest');
+  if (hostBtns)  hostBtns.style.display  = isHost ? 'flex' : 'none';
+  if (guestBtns) guestBtns.style.display = isHost ? 'none' : 'flex';
+
+  // ── Confetti for everyone ──
+  launchConfetti();
 }
 
-async function playAgain() {
+// Host: reset the room → everyone goes back to lobby
+async function hostPlayAgain() {
+  const ack = await socketAction('reset_room', { id: myId, code: currentRoom });
+  if (ack.error)    return showToast(ack.error);
+  if (ack._timeout) return showToast('Server timed out — please try again');
   document.getElementById('winOverlay').classList.remove('show');
+  myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0; myPrevRank=null;
+  // room_update with status:'lobby' will call showLobby for everyone
+}
 
-  if (isHost) {
-    const ack = await socketAction('reset_room', { id: myId, code: currentRoom });
-    if (ack && ack.error) return showToast(ack.error);
-    myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
-    // room_update event will broadcast lobby status → routeRoomUpdate → showLobby
-  } else {
-    // Guest navigates to lobby to wait for host reset.
-    // Staying on game screen caused a showWin loop — lobby is the safe waiting screen.
-    myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0;
-    showLobby(currentRoom, _room);
-  }
+// Guest: go to lobby screen and wait for host to restart
+function guestGoLobby() {
+  document.getElementById('winOverlay').classList.remove('show');
+  myCard=[]; lastCalledLen=0; lastChatLen=0; lastRankLen=0; myPrevLines=0; myPrevRank=null;
+  showLobby(currentRoom, _room);
+  showToast('Waiting for host to start a new game…');
+}
+
+// Both: leave the room and return to main menu
+function winMainMenu() {
+  document.getElementById('winOverlay').classList.remove('show');
+  socket.emit('leave_room', { id: myId, code: currentRoom });
+  currentRoom = null; isHost = false; myCard = [];
+  showScreen('welcomeScreen');
+  loadRooms();
+}
+
+// Keep old name as alias so any stray references still work
+async function playAgain() {
+  if (isHost) await hostPlayAgain();
+  else guestGoLobby();
 }
 
 
