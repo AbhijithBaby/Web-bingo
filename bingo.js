@@ -2,7 +2,7 @@
 //  BINGO! — Client logic  (WebSocket edition)
 // ════════════════════════════════════════
 
-const API    = 'https://web-bingo-sever.onrender.com';
+const API    = 'https://web-bingo-sever.onrender.com/';
 const socket = io();   // connects to same host:port automatically
 
 // ── Persistent identity ──
