@@ -2,7 +2,7 @@
 //  BINGO! — Client logic  (WebSocket edition)
 // ════════════════════════════════════════
 
-const API    = 'https://web-bingo-sever.onrender.com';
+const API    = '';
 const socket = io();   // connects to same host:port automatically
 
 // ── Persistent identity ──
@@ -169,11 +169,17 @@ socket.on('disconnect', () => {
   setStatusBar(false);
 });
 
+socket.on('connect_error', (err) => {
+  setStatusBar(false);
+  console.warn('Socket connection error:', err && err.message ? err.message : err);
+});
+
 socket.on('room_update', room => {
   routeRoomUpdate(room);
 });
 
 socket.on('kicked', () => {
+  stopLobbyRefresh();
   currentRoom = null; isHost = false; myCard = [];
   document.getElementById('winOverlay').classList.remove('show');
   showScreen('welcomeScreen');
@@ -182,6 +188,7 @@ socket.on('kicked', () => {
 });
 
 socket.on('room_closed', () => {
+  stopLobbyRefresh();
   currentRoom = null; isHost = false; myCard = [];
   document.getElementById('winOverlay').classList.remove('show');
   showScreen('welcomeScreen');
@@ -271,6 +278,7 @@ function exitLobby() {
     ? 'You are the host. Leaving will close the room for everyone.'
     : 'You will be removed from the lobby.';
   openExitModal('Exit to Main Menu?', msg, () => {
+    stopLobbyRefresh();
     socket.emit('leave_room', { id: myId, code: currentRoom });
     currentRoom = null; isHost = false;
     showScreen('welcomeScreen');
@@ -546,7 +554,40 @@ function showLobby(code, room) {
   document.getElementById('guestWait').style.display    = isHost ? 'none'  : 'block';
 
   renderLobbyPlayers(room);
-  // Note: no startPolling / startHeartbeat — socket handles all of that now
+  // Socket updates drive the lobby in real time; this is just a safety net
+  // in case a room_update broadcast is ever missed (e.g. a flaky connection).
+  startLobbyRefresh();
+}
+
+// ── Lobby safety-net refresh ──
+// Falls back to the existing, independent HTTP room-fetch endpoint every few
+// seconds while sitting in the lobby, so the player list and presence dots
+// self-correct even if a socket broadcast doesn't arrive for any reason.
+// This never runs elsewhere (setup/game), so it doesn't reintroduce polling
+// for anything latency-sensitive — only the lobby's "who's here" list.
+let lobbyRefreshInterval = null;
+
+function startLobbyRefresh() {
+  stopLobbyRefresh();
+  lobbyRefreshInterval = setInterval(async () => {
+    if (!currentRoom) return;
+    if (!document.getElementById('lobbyScreen').classList.contains('active')) return;
+    const room = await apiCall(`/api/room/${currentRoom}`, 'GET', null, true);
+    if (!room || room.error || room.status !== 'lobby') return;
+    gs = room.gridSize;
+    renderLobbyPlayers(room);
+    const meta = document.getElementById('lobbyMeta');
+    meta.textContent = (room.public ? '🌐 Public' : '🔒 Private')
+      + (room.hasPassword ? ' · Password protected' : '');
+    if (isHost) {
+      hGS = room.gridSize; hPublic = room.public; hPwEnabled = room.hasPassword;
+      syncHgsDisplay(); syncLobbyToggles();
+    }
+  }, 3000);
+}
+
+function stopLobbyRefresh() {
+  if (lobbyRefreshInterval) { clearInterval(lobbyRefreshInterval); lobbyRefreshInterval = null; }
 }
 
 function renderLobbyPlayers(room) {
@@ -660,6 +701,7 @@ async function startGame() {
 // ════════════════════════════════════════
 
 function showSetup(room) {
+  stopLobbyRefresh();
   gs = room.gridSize;
   showScreen('setupScreen');
   document.getElementById('setupTitle').textContent = `Fill your ${gs}×${gs} grid`;
